@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>2FA Live Token Generator</title>
+    <!-- Load the OTP library (No download needed, runs in browser) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/otpauth/9.1.4/otpauth.umd.min.js"></script>
     <style>
         :root {
             --bg-color: #0f172a;
@@ -111,11 +113,6 @@
             background-color: var(--primary-hover);
         }
 
-        .btn-submit:disabled {
-            opacity: 0.7;
-            cursor: not-allowed;
-        }
-
         .result-container {
             margin-top: 2rem;
             padding: 1.5rem;
@@ -136,6 +133,23 @@
             word-break: break-all;
         }
 
+        .timer-bar {
+            width: 100%;
+            height: 4px;
+            background: #334155;
+            margin-top: 15px;
+            border-radius: 2px;
+            overflow: hidden;
+            display: none;
+        }
+        
+        .timer-fill {
+            height: 100%;
+            background: var(--primary);
+            width: 100%;
+            transition: width 1s linear;
+        }
+
         .btn-copy {
             background: transparent;
             border: 1px solid var(--border);
@@ -145,6 +159,7 @@
             cursor: pointer;
             font-size: 0.9rem;
             transition: 0.2s;
+            margin-top: 15px;
         }
 
         .btn-copy:hover {
@@ -160,19 +175,6 @@
         }
         .text-error { color: var(--error); }
         .text-success { color: var(--success); }
-
-        /* Spinner */
-        .spinner {
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 1s ease-in-out infinite;
-            margin-right: 10px;
-            display: none;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -189,72 +191,93 @@
         </div>
 
         <button class="btn-submit" id="submitBtn" onclick="generateToken()">
-            <div class="spinner" id="loadingSpinner"></div>
-            <span>Get Code</span>
+            Get Code
         </button>
         
         <div id="status"></div>
 
         <div class="result-container" id="resultContainer">
-            <div class="token-display" id="tokenOutput"></div>
+            <div class="token-display" id="tokenOutput">--- ---</div>
+            <div class="timer-bar" id="timerBar"><div class="timer-fill" id="timerFill"></div></div>
             <button class="btn-copy" onclick="copyCode()">Copy Code</button>
         </div>
     </div>
 
     <script>
-        async function generateToken() {
+        // Store interval ID to clear it if user clicks again
+        let timerInterval = null;
+
+        function generateToken() {
             const input = document.getElementById('secretInput');
-            const btn = document.getElementById('submitBtn');
-            const spinner = document.getElementById('loadingSpinner');
-            const btnText = btn.querySelector('span');
             const status = document.getElementById('status');
             const resultBox = document.getElementById('resultContainer');
             const tokenOut = document.getElementById('tokenOutput');
+            const timerBar = document.getElementById('timerBar');
+            const timerFill = document.getElementById('timerFill');
 
-            // 1. Clean the secret (remove spaces, etc.)
+            // 1. Clean the secret (remove spaces, standard 2FA cleaning)
             const rawSecret = input.value;
-            const cleanSecret = rawSecret.replace(/[^a-zA-Z0-9]/g, '');
+            const cleanSecret = rawSecret.replace(/\s/g, '').toUpperCase();
 
-            if (cleanSecret.length < 5) {
-                status.innerHTML = '<span class="text-error">Please enter a valid secret key.</span>';
+            // Reset UI
+            status.innerHTML = '';
+            
+            if (cleanSecret.length < 8) {
+                status.innerHTML = '<span class="text-error">Secret key is too short.</span>';
+                resultBox.style.display = 'none';
                 return;
             }
 
-            // UI Loading
-            btn.disabled = true;
-            spinner.style.display = 'block';
-            btnText.innerText = 'Fetching...';
-            status.innerHTML = '';
-            resultBox.style.display = 'none';
-
-            // 2. The URL
-            // We use 'api.allorigins.win/raw' to proxy the request and bypass CORS
-            const targetUrl = `https://2fa.live/tok/${cleanSecret}`;
-            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-
             try {
-                const response = await fetch(proxyUrl);
-                
-                if (!response.ok) throw new Error("Network response was not ok");
-                
-                const data = await response.json();
+                // 2. Generate the Token locally using OTPAuth library
+                // This does NOT send data to any server. It calculates it right here.
+                const totp = new OTPAuth.TOTP({
+                    algorithm: 'SHA1',
+                    digits: 6,
+                    period: 30,
+                    secret: OTPAuth.Secret.fromBase32(cleanSecret)
+                });
 
-                if (data.token) {
-                    tokenOut.innerText = data.token;
-                    resultBox.style.display = 'block';
-                    status.innerHTML = '<span class="text-success">Token generated successfully!</span>';
-                } else {
-                    throw new Error("Token not found in response");
-                }
+                const code = totp.generate();
+                
+                // Update UI
+                tokenOut.innerText = code;
+                resultBox.style.display = 'block';
+                timerBar.style.display = 'block';
+                status.innerHTML = '<span class="text-success">Generated successfully (Offline Mode)</span>';
+
+                // 3. Handle the countdown timer
+                updateTimer();
+                if (timerInterval) clearInterval(timerInterval);
+                timerInterval = setInterval(() => {
+                    const newCode = totp.generate();
+                    if (newCode !== tokenOut.innerText) {
+                        tokenOut.innerText = newCode;
+                        flashUpdate();
+                    }
+                    updateTimer();
+                }, 1000);
 
             } catch (err) {
                 console.error(err);
-                status.innerHTML = `<span class="text-error">Failed: Check your internet or Key.</span>`;
-            } finally {
-                btn.disabled = false;
-                spinner.style.display = 'none';
-                btnText.innerText = 'Get Code';
+                status.innerHTML = `<span class="text-error">Invalid Key format. Check your secret.</span>`;
+                resultBox.style.display = 'none';
             }
+        }
+
+        function updateTimer() {
+            const epoch = Math.round(new Date().getTime() / 1000.0);
+            const countDown = 30 - (epoch % 30);
+            const percentage = (countDown / 30) * 100;
+            document.getElementById('timerFill').style.width = percentage + '%';
+        }
+
+        function flashUpdate() {
+            const display = document.getElementById('tokenOutput');
+            display.style.color = '#fff';
+            setTimeout(() => {
+                display.style.color = 'var(--primary)';
+            }, 300);
         }
 
         function copyCode() {
